@@ -1,4 +1,3 @@
-
 import os
 import re
 import requests
@@ -12,16 +11,38 @@ SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
 
 # ==================== 工具函数 ====================
 
-def clean_html(raw):
-    """清洗HTML标签，保留纯文本"""
+def clean_text(raw):
+    """清洗文本：去HTML标签、换行符、多余空格"""
     if not raw:
         return ""
+    # 去HTML标签
     clean = re.sub(r'<[^>]+>', '', raw)
+    # 去换行符和制表符
+    clean = clean.replace('\n', ' ').replace('\t', ' ').replace('\r', ' ')
+    # 去多余空格
     clean = re.sub(r'\s+', ' ', clean).strip()
+    # 去常见垃圾前缀
     clean = re.sub(r'^(图片来源|图|原标题|原题|导语)\s*[:：]?\s*', '', clean)
     return clean
 
-def fetch_rss_news(url, max_items=6):
+def is_international_keyword(title):
+    """判断标题是否含国际关键词（用于过滤混入国内板块的国际新闻）"""
+    keywords = [
+        "伊朗", "以色列", "巴勒斯坦", "加沙", "黎巴嫩", "叙利亚", "也门", "沙特",
+        "俄罗斯", "乌克兰", "普京", "泽连斯基", "北约", "欧盟",
+        "美国", "拜登", "特朗普", "白宫", "五角大楼", "美联储", "国会",
+        "朝鲜", "韩国", "日本", "印度", "巴基斯坦", "阿富汗", "伊拉克",
+        "土耳其", "埃尔多安", "法国", "德国", "英国", "意大利",
+        "联合国", "G7", "G20", "北约", "世贸", "世卫",
+        "美元", "欧元", "英镑", "日元", "韩元",
+        "波音", "SpaceX", "马斯克", "苹果", "谷歌", "微软",
+        "美联储", "加息", "降息", "CPI", "非农数据",
+        "以军", "哈马斯", "真主党", "胡塞", "塔利班",
+    ]
+    title_lower = title.lower()
+    return any(kw in title_lower for kw in keywords)
+
+def fetch_rss_news(url, max_items=6, filter_intl=False):
     """通用RSS解析器，提取标题+摘要"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -50,20 +71,26 @@ def fetch_rss_news(url, max_items=6):
             desc = item.find("description")
             content = item.find("content:encoded", namespaces)
             
-            title_text = clean_html(title.text) if title is not None and title.text else ""
+            title_text = clean_text(title.text) if title is not None and title.text else ""
             link_text = link.text.strip() if link is not None and link.text else ""
             
+            # 提取摘要
             desc_text = ""
             if content is not None and content.text:
-                desc_text = clean_html(content.text)
+                desc_text = clean_text(content.text)
             elif desc is not None and desc.text:
-                desc_text = clean_html(desc.text)
+                desc_text = clean_text(desc.text)
             
             if desc_text:
                 if len(desc_text) > 200:
                     desc_text = desc_text[:200] + "..."
                 elif len(desc_text) < 15:
                     desc_text = ""
+            
+            # 过滤国际新闻混入国内板块
+            if filter_intl and is_international_keyword(title_text):
+                print(f"   🚫 过滤国际新闻: {title_text[:30]}...")
+                continue
             
             if title_text and title_text not in [i["title"] for i in items]:
                 items.append({
@@ -80,7 +107,7 @@ def fetch_rss_news(url, max_items=6):
         print(f"   ❌ 异常: {str(e)[:100]}")
         return []
 
-def fetch_news_multi_sources(sources, max_items=6):
+def fetch_news_multi_sources(sources, max_items=6, filter_intl=False):
     """多源聚合，自动去重，凑够条数"""
     all_news = []
     seen = set()
@@ -89,7 +116,7 @@ def fetch_news_multi_sources(sources, max_items=6):
         if len(all_news) >= max_items:
             break
         print(f"📡 尝试 {name}...")
-        news = fetch_rss_news(url, max_items=max_items - len(all_news) + 1)
+        news = fetch_rss_news(url, max_items=max_items - len(all_news) + 2, filter_intl=filter_intl)
         for n in news:
             if n["title"] not in seen:
                 seen.add(n["title"])
@@ -113,17 +140,16 @@ def get_international_news():
     return fetch_news_multi_sources(sources, max_items=6)
 
 def get_domestic_news():
-    """国内热点 - 社会、商业、民生"""
+    """国内热点 - 社会、商业、民生（过滤国际内容）"""
     sources = [
         ("澎湃新闻", "https://rsshub.rssforever.com/thepaper/sidebar/hotNews"),
-        ("联合早报", "https://rsshub.rssforever.com/zaobao/realtime/china"),
         ("知乎热榜", "https://plink.anyfeeder.com/zhihu/hotlist"),
         ("虎嗅", "https://www.huxiu.com/rss/0.xml"),
         ("界面新闻", "https://a.jiemian.com/index.php?m=article&a=rss"),
         ("人民网", "http://feedmaker.kindle4rss.com/feeds/politics.people.com.cn.xml"),
     ]
     print("\n🇨🇳 === 国内新闻 ===")
-    return fetch_news_multi_sources(sources, max_items=6)
+    return fetch_news_multi_sources(sources, max_items=6, filter_intl=True)
 
 # ==================== 金融数据 ====================
 
@@ -174,10 +200,12 @@ def get_us_stock():
         return {"error": str(e)}
 
 def get_gold_prices():
-    """国际金价 + 国内金价"""
+    """国际金价 + 国内实物金价"""
     result = {}
+    
+    # ===== 国际金价 =====
+    # 主源：COMEX黄金期货
     try:
-        # 国际金价：COMEX黄金期货（美元/盎司）
         gold = yf.Ticker("GC=F")
         g_hist = gold.history(period="2d")
         if len(g_hist) >= 2:
@@ -187,22 +215,72 @@ def get_gold_prices():
                 "price": round(g_latest, 2),
                 "change_pct": round(((g_latest - g_prev) / g_prev) * 100, 2)
             }
+            print("✅ 国际金价(COMEX)获取成功")
     except Exception as e:
-        print(f"国际金价获取失败: {e}")
+        print(f"❌ COMEX黄金获取失败: {e}")
     
+    # 备用：GLD（SPDR黄金ETF）
+    if "intl" not in result:
+        try:
+            gld = yf.Ticker("GLD")
+            g_hist = gld.history(period="2d")
+            if len(g_hist) >= 2:
+                g_latest = g_hist["Close"].iloc[-1]
+                g_prev = g_hist["Close"].iloc[-2]
+                # GLD 价格约为金价的1/10，换算回金价
+                result["intl"] = {
+                    "price": round(g_latest * 10, 2),
+                    "change_pct": round(((g_latest - g_prev) / g_prev) * 100, 2)
+                }
+                print("✅ 国际金价(GLD备用)获取成功")
+        except Exception as e:
+            print(f"❌ GLD备用也失败: {e}")
+    
+    # ===== 国内实物金价 =====
     try:
-        # 国内金价：华安黄金ETF（人民币/克，跟踪上海金，走势一致）
-        cn_gold = yf.Ticker("518880.SS")
-        c_hist = cn_gold.history(period="2d")
-        if len(c_hist) >= 2:
-            c_latest = c_hist["Close"].iloc[-1]
-            c_prev = c_hist["Close"].iloc[-2]
-            result["domestic"] = {
-                "price": round(c_latest, 3),
-                "change_pct": round(((c_latest - c_prev) / c_prev) * 100, 2)
-            }
+        resp = requests.get("https://api.iyuns.com/api/goldprice", 
+                           headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        data = resp.json()
+        if data.get("code") == 200:
+            # 取银行金条均价作为实物金价参考
+            bank_prices = data["data"].get("bank_gold_bar_price", [])
+            if bank_prices:
+                prices = []
+                for bp in bank_prices:
+                    try:
+                        p = float(bp["price"])
+                        prices.append(p)
+                    except:
+                        continue
+                if prices:
+                    avg_price = sum(prices) / len(prices)
+                    result["domestic"] = {
+                        "price": round(avg_price, 1),
+                        "unit": "元/克",
+                        "source": "银行金条均价"
+                    }
+                    print(f"✅ 国内实物金价获取成功: {round(avg_price,1)}元/克")
+            
+            # 如果没有银行金条数据，取首饰金
+            if "domestic" not in result:
+                jewelry = data["data"].get("precious_metal_price", [])
+                if jewelry:
+                    # 取周大福金价
+                    for j in jewelry:
+                        if j.get("brand") == "周大福":
+                            try:
+                                price = float(j["gold_price"])
+                                result["domestic"] = {
+                                    "price": round(price, 1),
+                                    "unit": "元/克",
+                                    "source": "周大福足金999"
+                                }
+                                print(f"✅ 国内实物金价(首饰金)获取成功: {round(price,1)}元/克")
+                                break
+                            except:
+                                continue
     except Exception as e:
-        print(f"国内金价获取失败: {e}")
+        print(f"❌ 国内实物金价获取失败: {e}")
     
     return result
 
@@ -315,7 +393,7 @@ def build_report():
                 lines.append(f"🔴 {down_str}")
             lines.append("")
     
-    # ===== 金价走势（国际+国内）=====
+    # ===== 金价走势（国际+国内实物）=====
     lines.append("🥇 <b>金价走势</b>")
     if gold_data:
         if "intl" in gold_data:
@@ -325,8 +403,11 @@ def build_report():
         
         if "domestic" in gold_data:
             g = gold_data["domestic"]
-            emoji = "📈" if g["change_pct"] >= 0 else "📉"
-            lines.append(f"{emoji} <b>国内金价</b>（黄金ETF）: {g['price']}元/克 ({g['change_pct']:+.2f}%)")
+            emoji = "📈" if g.get("change_pct", 0) >= 0 else "📉"
+            source = g.get("source", "")
+            lines.append(f"{emoji} <b>国内实物金</b>（{source}）: {g['price']}{g['unit']}")
+        else:
+            lines.append("⏳ 国内实物金价: 获取中...")
     else:
         lines.append("获取失败")
     lines.append("")
@@ -416,4 +497,3 @@ if __name__ == "__main__":
     
     if not pushed:
         print("⚠️ 未配置推送渠道")
-
