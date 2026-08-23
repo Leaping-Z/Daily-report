@@ -15,12 +15,9 @@ def clean_html(raw):
     """清洗HTML标签，保留纯文本"""
     if not raw:
         return ""
-    # 去掉HTML标签
     clean = re.sub(r'<[^>]+>', '', raw)
-    # 去掉多余空白
     clean = re.sub(r'\s+', ' ', clean).strip()
-    # 去掉常见RSS垃圾前缀
-    clean = re.sub(r'^(图片来源|图|原标题|原标题：|原题|导语|导语：)\s*', '', clean)
+    clean = re.sub(r'^(图片来源|图|原标题|原题|导语)\s*[:：]?\s*', '', clean)
     return clean
 
 def fetch_rss_news(url, max_items=6):
@@ -29,11 +26,18 @@ def fetch_rss_news(url, max_items=6):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     try:
+        print(f"   请求: {url[:60]}...")
         resp = requests.get(url, headers=headers, timeout=20)
+        print(f"   状态码: {resp.status_code}")
+        
+        if resp.status_code != 200:
+            print(f"   ❌ HTTP {resp.status_code}")
+            return []
+        
         resp.encoding = 'utf-8'
         root = ET.fromstring(resp.content)
         
-        # 注册命名空间（有些RSS用content:encoded）
+        # 注册命名空间
         namespaces = {
             'content': 'http://purl.org/rss/1.0/modules/content/',
             'dc': 'http://purl.org/dc/elements/1.1/'
@@ -58,12 +62,12 @@ def fetch_rss_news(url, max_items=6):
             elif desc is not None and desc.text:
                 desc_text = clean_html(desc.text)
             
-            # 截断摘要到合适长度
+            # 截断摘要
             if desc_text:
-                if len(desc_text) > 180:
-                    desc_text = desc_text[:180] + "..."
-                elif len(desc_text) < 20:
-                    desc_text = ""  # 太短的摘要不要
+                if len(desc_text) > 200:
+                    desc_text = desc_text[:200] + "..."
+                elif len(desc_text) < 15:
+                    desc_text = ""
             
             if title_text and title_text not in [i["title"] for i in items]:
                 items.append({
@@ -73,9 +77,11 @@ def fetch_rss_news(url, max_items=6):
                 })
             if len(items) >= max_items:
                 break
+        
+        print(f"   ✅ 获取 {len(items)} 条")
         return items
     except Exception as e:
-        print(f"RSS失败: {str(e)[:80]}")
+        print(f"   ❌ 异常: {str(e)[:100]}")
         return []
 
 def fetch_news_multi_sources(sources, max_items=6):
@@ -86,14 +92,15 @@ def fetch_news_multi_sources(sources, max_items=6):
     for name, url in sources:
         if len(all_news) >= max_items:
             break
+        print(f"📡 尝试 {name}...")
         news = fetch_rss_news(url, max_items=max_items - len(all_news) + 1)
         for n in news:
             if n["title"] not in seen:
                 seen.add(n["title"])
                 n["source"] = name
                 all_news.append(n)
-        print(f"{'✅' if news else '❌'} {name}: {len(news)}条")
     
+    print(f"📊 总计: {len(all_news)} 条")
     return all_news[:max_items]
 
 # ==================== 新闻获取 ====================
@@ -102,21 +109,30 @@ def get_international_news():
     """国际时政 - 聚焦冲突、外交、地缘"""
     sources = [
         ("BBC中文", "http://feeds.bbci.co.uk/zhongwen/simp/rss.xml"),
-        ("联合早报", "https://rsshub.app/zaobao/realtime/world"),
-        ("路透", "https://rsshub.app/reuters/world/china"),
-        ("德国之声", "https://rsshub.app/dw/news"),
+        ("联合早报", "https://rsshub.rssforever.com/zaobao/realtime/world"),
+        ("路透", "https://rsshub.rssforever.com/reuters/world/china"),
+        ("德国之声", "https://rsshub.rssforever.com/dw/news"),
     ]
+    print("\n🌍 === 国际新闻 ===")
     return fetch_news_multi_sources(sources, max_items=6)
 
 def get_domestic_news():
-    """国内热点 - 社会、商业、民生，减少政治口号"""
+    """国内热点 - 社会、商业、民生"""
     sources = [
-        ("澎湃新闻", "https://rsshub.app/thepaper/featured"),
-        ("界面新闻", "https://rsshub.app/jiemian/lists/71.html"),
-        ("36氪", "https://rsshub.app/36kr/newsflashes"),
-        ("虎嗅", "https://rsshub.app/huxiu/article"),
-        ("网易", "https://rsshub.app/netease/news/rank/whole/click/10"),
+        # 澎湃新闻热榜（有摘要，内容质量高）
+        ("澎湃新闻", "https://rsshub.rssforever.com/thepaper/sidebar/hotNews"),
+        # 联合早报中国版（新加坡源，稳定）
+        ("联合早报", "https://rsshub.rssforever.com/zaobao/realtime/china"),
+        # 知乎热榜（社会热点）
+        ("知乎热榜", "https://plink.anyfeeder.com/zhihu/hotlist"),
+        # 虎嗅（商业科技）
+        ("虎嗅", "https://www.huxiu.com/rss/0.xml"),
+        # 界面新闻
+        ("界面新闻", "https://a.jiemian.com/index.php?m=article&a=rss"),
+        # 人民网国内（备选）
+        ("人民网", "http://feedmaker.kindle4rss.com/feeds/politics.people.com.cn.xml"),
     ]
+    print("\n🇨🇳 === 国内新闻 ===")
     return fetch_news_multi_sources(sources, max_items=6)
 
 # ==================== 金融数据 ====================
@@ -124,7 +140,6 @@ def get_domestic_news():
 def get_us_stock():
     """美股三大指数 + 热门个股"""
     try:
-        # 三大指数
         indices = {
             "道琼斯": "^DJI",
             "纳斯达克": "^IXIC",
@@ -170,7 +185,7 @@ def get_us_stock():
         return {"error": str(e)}
 
 def get_commodities():
-    """大宗商品"""
+    """大宗商品 & 汇率"""
     try:
         result = {}
         
@@ -228,13 +243,10 @@ def build_report():
     today = datetime.now().strftime("%Y年%m月%d日")
     weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
     
-    print("🌍 获取国际时政...")
     intl_news = get_international_news()
-    
-    print("🇨🇳 获取国内热点...")
     domestic_news = get_domestic_news()
     
-    print("📈 获取金融数据...")
+    print("\n📈 获取金融数据...")
     us_stock = get_us_stock()
     comm = get_commodities()
     
@@ -272,13 +284,11 @@ def build_report():
     if "error" in us_stock:
         lines.append(f"获取失败: {us_stock['error']}")
     else:
-        # 三大指数
         for name, data in us_stock.get("indices", {}).items():
             emoji = "📈" if data["change"] >= 0 else "📉"
             lines.append(f"{emoji} <b>{name}</b>: {data['price']} ({data['change']:+.2f}, {data['change_pct']:+.2f}%)")
         lines.append("")
         
-        # 热门个股
         stocks = us_stock.get("stocks", {})
         if stocks:
             lines.append("<b>热门个股涨跌：</b>")
