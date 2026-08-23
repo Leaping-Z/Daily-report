@@ -1,3 +1,4 @@
+
 import os
 import re
 import requests
@@ -37,7 +38,6 @@ def fetch_rss_news(url, max_items=6):
         resp.encoding = 'utf-8'
         root = ET.fromstring(resp.content)
         
-        # 注册命名空间
         namespaces = {
             'content': 'http://purl.org/rss/1.0/modules/content/',
             'dc': 'http://purl.org/dc/elements/1.1/'
@@ -47,22 +47,18 @@ def fetch_rss_news(url, max_items=6):
         for item in root.iter("item"):
             title = item.find("title")
             link = item.find("link")
-            
-            # 优先取 description，其次取 content:encoded
             desc = item.find("description")
             content = item.find("content:encoded", namespaces)
             
             title_text = clean_html(title.text) if title is not None and title.text else ""
             link_text = link.text.strip() if link is not None and link.text else ""
             
-            # 提取摘要
             desc_text = ""
             if content is not None and content.text:
                 desc_text = clean_html(content.text)
             elif desc is not None and desc.text:
                 desc_text = clean_html(desc.text)
             
-            # 截断摘要
             if desc_text:
                 if len(desc_text) > 200:
                     desc_text = desc_text[:200] + "..."
@@ -119,17 +115,11 @@ def get_international_news():
 def get_domestic_news():
     """国内热点 - 社会、商业、民生"""
     sources = [
-        # 澎湃新闻热榜（有摘要，内容质量高）
         ("澎湃新闻", "https://rsshub.rssforever.com/thepaper/sidebar/hotNews"),
-        # 联合早报中国版（新加坡源，稳定）
         ("联合早报", "https://rsshub.rssforever.com/zaobao/realtime/china"),
-        # 知乎热榜（社会热点）
         ("知乎热榜", "https://plink.anyfeeder.com/zhihu/hotlist"),
-        # 虎嗅（商业科技）
         ("虎嗅", "https://www.huxiu.com/rss/0.xml"),
-        # 界面新闻
         ("界面新闻", "https://a.jiemian.com/index.php?m=article&a=rss"),
-        # 人民网国内（备选）
         ("人民网", "http://feedmaker.kindle4rss.com/feeds/politics.people.com.cn.xml"),
     ]
     print("\n🇨🇳 === 国内新闻 ===")
@@ -161,7 +151,6 @@ def get_us_stock():
                     "change_pct": round(change_pct, 2)
                 }
         
-        # 热门个股
         hot_stocks = {
             "苹果": "AAPL", "微软": "MSFT", "英伟达": "NVDA",
             "特斯拉": "TSLA", "Meta": "META", "谷歌": "GOOGL",
@@ -184,21 +173,43 @@ def get_us_stock():
     except Exception as e:
         return {"error": str(e)}
 
-def get_commodities():
-    """大宗商品 & 汇率"""
+def get_gold_prices():
+    """国际金价 + 国内金价"""
+    result = {}
     try:
-        result = {}
-        
-        # 黄金
+        # 国际金价：COMEX黄金期货（美元/盎司）
         gold = yf.Ticker("GC=F")
         g_hist = gold.history(period="2d")
         if len(g_hist) >= 2:
             g_latest = g_hist["Close"].iloc[-1]
             g_prev = g_hist["Close"].iloc[-2]
-            result["gold"] = {
+            result["intl"] = {
                 "price": round(g_latest, 2),
                 "change_pct": round(((g_latest - g_prev) / g_prev) * 100, 2)
             }
+    except Exception as e:
+        print(f"国际金价获取失败: {e}")
+    
+    try:
+        # 国内金价：华安黄金ETF（人民币/克，跟踪上海金，走势一致）
+        cn_gold = yf.Ticker("518880.SS")
+        c_hist = cn_gold.history(period="2d")
+        if len(c_hist) >= 2:
+            c_latest = c_hist["Close"].iloc[-1]
+            c_prev = c_hist["Close"].iloc[-2]
+            result["domestic"] = {
+                "price": round(c_latest, 3),
+                "change_pct": round(((c_latest - c_prev) / c_prev) * 100, 2)
+            }
+    except Exception as e:
+        print(f"国内金价获取失败: {e}")
+    
+    return result
+
+def get_commodities():
+    """大宗商品 & 汇率"""
+    try:
+        result = {}
         
         # 原油 WTI
         oil = yf.Ticker("CL=F")
@@ -248,6 +259,7 @@ def build_report():
     
     print("\n📈 获取金融数据...")
     us_stock = get_us_stock()
+    gold_data = get_gold_prices()
     comm = get_commodities()
     
     lines = []
@@ -303,14 +315,25 @@ def build_report():
                 lines.append(f"🔴 {down_str}")
             lines.append("")
     
-    # ===== 大宗商品 & 汇率 =====
-    lines.append("🥇 <b>大宗商品 & 汇率</b>")
-    if "error" not in comm:
-        if "gold" in comm:
-            g = comm["gold"]
+    # ===== 金价走势（国际+国内）=====
+    lines.append("🥇 <b>金价走势</b>")
+    if gold_data:
+        if "intl" in gold_data:
+            g = gold_data["intl"]
             emoji = "📈" if g["change_pct"] >= 0 else "📉"
-            lines.append(f"{emoji} 黄金: {g['price']}美元/盎司 ({g['change_pct']:+.2f}%)")
+            lines.append(f"{emoji} <b>国际金价</b>（COMEX）: {g['price']}美元/盎司 ({g['change_pct']:+.2f}%)")
         
+        if "domestic" in gold_data:
+            g = gold_data["domestic"]
+            emoji = "📈" if g["change_pct"] >= 0 else "📉"
+            lines.append(f"{emoji} <b>国内金价</b>（黄金ETF）: {g['price']}元/克 ({g['change_pct']:+.2f}%)")
+    else:
+        lines.append("获取失败")
+    lines.append("")
+    
+    # ===== 大宗商品 & 汇率 =====
+    lines.append("💱 <b>其他市场</b>")
+    if "error" not in comm:
         if "oil" in comm:
             o = comm["oil"]
             emoji = "📈" if o["change_pct"] >= 0 else "📉"
