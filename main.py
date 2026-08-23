@@ -2,16 +2,16 @@ import os
 import requests
 import yfinance as yf
 from datetime import datetime, timedelta
-import json
 import xml.etree.ElementTree as ET
 
 # ==================== 配置区 ====================
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "")
 SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY", "")
 
-# ==================== 新闻获取 ====================
-def fetch_rss_news(url, title_tag="title", desc_tag="description", max_items=5):
-    """通用RSS解析器"""
+# ==================== 新闻获取（多源备用）====================
+
+def fetch_rss_news(url, max_items=5):
+    """通用RSS解析器，带错误处理"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
@@ -19,71 +19,65 @@ def fetch_rss_news(url, title_tag="title", desc_tag="description", max_items=5):
         resp = requests.get(url, headers=headers, timeout=15)
         resp.encoding = 'utf-8'
         root = ET.fromstring(resp.content)
-
-        # 处理不同RSS格式
+        
         items = []
         for item in root.iter("item"):
-            title = item.find(title_tag)
-            desc = item.find(desc_tag)
+            title = item.find("title")
             link = item.find("link")
-            pub_date = item.find("pubDate")
-
+            
             title_text = title.text.strip() if title is not None and title.text else ""
-            desc_text = desc.text.strip() if desc is not None and desc.text else ""
             link_text = link.text.strip() if link is not None and link.text else ""
-
-            if title_text:
-                items.append({
-                    "title": title_text,
-                    "desc": desc_text[:120] + "..." if len(desc_text) > 120 else desc_text,
-                    "link": link_text
-                })
+            
+            if title_text and title_text not in [i["title"] for i in items]:
+                items.append({"title": title_text, "link": link_text})
             if len(items) >= max_items:
                 break
         return items
     except Exception as e:
-        return [{"title": f"⚠️ 获取失败: {str(e)[:50]}", "desc": "", "link": ""}]
+        print(f"RSS失败 {url}: {str(e)[:60]}")
+        return []
+
+def fetch_news_multi_sources(sources, max_items=5):
+    """多源聚合，自动去重，直到凑够条数"""
+    all_news = []
+    seen = set()
+    
+    for name, url in sources:
+        if len(all_news) >= max_items:
+            break
+        news = fetch_rss_news(url, max_items=max_items - len(all_news))
+        for n in news:
+            if n["title"] not in seen:
+                seen.add(n["title"])
+                n["source"] = name
+                all_news.append(n)
+        if news:
+            print(f"✅ {name}: 获取 {len(news)} 条")
+        else:
+            print(f"❌ {name}: 获取失败")
+    
+    return all_news
 
 def get_international_news():
-    """国际新闻 - 多源聚合"""
+    """国际新闻 - 多源备用"""
     sources = [
         ("BBC中文", "http://feeds.bbci.co.uk/zhongwen/simp/rss.xml"),
+        ("联合早报", "https://rsshub.app/zaobao/realtime/world"),
         ("路透", "https://rsshub.app/reuters/world/china"),
+        ("FT中文", "https://rsshub.app/ft/chinese/hotstory"),
     ]
-    all_news = []
-    for name, url in sources:
-        news = fetch_rss_news(url, max_items=3)
-        for n in news:
-            n["source"] = name
-        all_news.extend(news)
-    # 去重并取前5条
-    seen = set()
-    result = []
-    for n in all_news:
-        if n["title"] not in seen and len(result) < 5:
-            seen.add(n["title"])
-            result.append(n)
-    return result
+    return fetch_news_multi_sources(sources, max_items=5)
 
 def get_domestic_news():
-    """国内新闻 - 多源聚合"""
+    """国内新闻 - 多源备用"""
     sources = [
-        ("新浪", "https://rsshub.app/sina/news/china"),
-        ("网易", "https://rsshub.app/netease/news/rank/whole/click/10"),
+        ("澎湃新闻", "https://rsshub.app/thepaper/featured"),
+        ("新浪新闻", "https://rsshub.app/sina/news/china"),
+        ("财新网", "https://rsshub.app/caixin/latest"),
+        ("人民网", "http://www.people.com.cn/rss/politics.xml"),
+        ("联合早报", "https://rsshub.app/zaobao/realtime/china"),
     ]
-    all_news = []
-    for name, url in sources:
-        news = fetch_rss_news(url, max_items=3)
-        for n in news:
-            n["source"] = name
-        all_news.extend(news)
-    seen = set()
-    result = []
-    for n in all_news:
-        if n["title"] not in seen and len(result) < 5:
-            seen.add(n["title"])
-            result.append(n)
-    return result
+    return fetch_news_multi_sources(sources, max_items=5)
 
 # ==================== 金融数据 ====================
 def get_us_stock():
@@ -149,31 +143,43 @@ def get_exchange_rate():
 def build_report():
     today = datetime.now().strftime("%Y年%m月%d日 %H:%M")
     weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now().weekday()]
-
-    # 获取数据
+    
+    print("🌍 获取国际新闻...")
     intl_news = get_international_news()
+    print(f"   共 {len(intl_news)} 条")
+    
+    print("🇨🇳 获取国内新闻...")
     domestic_news = get_domestic_news()
+    print(f"   共 {len(domestic_news)} 条")
+    
+    print("📈 获取金融数据...")
     us_stock = get_us_stock()
     gold = get_gold_price()
     fx = get_exchange_rate()
-
-    # 组装消息
+    
+    # 组装HTML消息（PushPlus html模板支持<b>标签）
     lines = []
     lines.append(f"📰 <b>每日晨报</b> | {today} {weekday}")
     lines.append("─" * 20)
-
+    
     # 国际新闻
     lines.append("🌍 <b>国际时事</b>")
-    for i, n in enumerate(intl_news, 1):
-        lines.append(f"{i}. {n['title']}")
+    if intl_news:
+        for i, n in enumerate(intl_news, 1):
+            lines.append(f"{i}. {n['title']}")
+    else:
+        lines.append("暂无数据")
     lines.append("")
-
+    
     # 国内新闻
     lines.append("🇨🇳 <b>国内热点</b>")
-    for i, n in enumerate(domestic_news, 1):
-        lines.append(f"{i}. {n['title']}")
+    if domestic_news:
+        for i, n in enumerate(domestic_news, 1):
+            lines.append(f"{i}. {n['title']}")
+    else:
+        lines.append("暂无数据")
     lines.append("")
-
+    
     # 美股
     lines.append("📈 <b>美股走势</b>")
     if "error" in us_stock:
@@ -183,7 +189,7 @@ def build_report():
             emoji = "📈" if data["change"] >= 0 else "📉"
             lines.append(f"{emoji} {name}: {data['price']} ({data['change']:+.2f}, {data['change_pct']:+.2f}%)")
     lines.append("")
-
+    
     # 金价
     lines.append("🥇 <b>金价走势</b>")
     if "error" in gold:
@@ -192,23 +198,23 @@ def build_report():
         emoji = "📈" if gold["change"] >= 0 else "📉"
         lines.append(f"{emoji} 现货黄金: {gold['price']}美元/盎司 ({gold['change']:+.2f}, {gold['change_pct']:+.2f}%)")
     lines.append("")
-
+    
     # 汇率
     lines.append("💱 <b>汇率</b>")
     if "error" in fx:
         lines.append(f"获取失败: {fx['error']}")
     else:
         lines.append(f"💵 美元兑人民币: {fx['rate']} ({fx['change_pct']:+.3f}%)")
-
+    
     lines.append("")
     lines.append("⏰ 数据截止至北京时间08:00")
     lines.append("🤖 由 GitHub Actions 自动生成")
-
+    
     return "\n".join(lines)
 
 # ==================== 推送 ====================
 def push_pushplus(content):
-    """PushPlus推送"""
+    """PushPlus推送（html模板）"""
     if not PUSHPLUS_TOKEN:
         print("❌ 未设置 PUSHPLUS_TOKEN")
         return False
@@ -217,7 +223,7 @@ def push_pushplus(content):
         "token": PUSHPLUS_TOKEN,
         "title": f"📰 每日晨报 {datetime.now().strftime('%m/%d')}",
         "content": content,
-        "template": "txt"
+        "template": "html"  # 关键修复：支持<b>标签渲染
     }
     try:
         resp = requests.post(url, data=data, timeout=15)
@@ -259,15 +265,15 @@ def push_serverchan(content):
 if __name__ == "__main__":
     print("🚀 开始生成每日晨报...")
     report = build_report()
+    print("\n" + "="*40)
     print(report)
-    print("\n" + "="*40 + "\n")
-
-    # 优先 PushPlus，备选 Server酱
+    print("="*40 + "\n")
+    
     pushed = False
     if PUSHPLUS_TOKEN:
         pushed = push_pushplus(report)
     if not pushed and SERVERCHAN_KEY:
         pushed = push_serverchan(report)
-
+    
     if not pushed:
-        print("⚠️ 未配置任何推送渠道，仅打印报告")
+        print("⚠️ 未配置任何推送渠道")
